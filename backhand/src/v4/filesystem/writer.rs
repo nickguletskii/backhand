@@ -763,9 +763,9 @@ impl<'a, 'b, 'c> FilesystemWriter<'a, 'b, 'c> {
         if self.pad_len != 0 {
             // Pad out block_size to 4K
             info!("Writing Padding");
-            let blocks_used: u32 = u32::try_from(superblock.bytes_used).unwrap() / self.pad_len;
-            let total_pad_len = (blocks_used + 1) * self.pad_len;
-            pad_len = total_pad_len - u32::try_from(superblock.bytes_used).unwrap();
+            let blocks_used: u64 = superblock.bytes_used / (self.pad_len as u64);
+            let total_pad_len = (blocks_used + 1) * (self.pad_len as u64);
+            pad_len = u32::try_from(total_pad_len - superblock.bytes_used).unwrap();
 
             // Write 1K at a time
             let mut total_written = 0;
