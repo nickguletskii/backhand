@@ -28,7 +28,8 @@ pub(crate) struct MetadataWriter<'a> {
     block_size: u32,
     data_endian: deku::ctx::Endian,
     /// Offset from the beginning of the metadata block last written
-    pub(crate) metadata_start: u32,
+    /// Changed from u32 to u64 to prevent overflow for large SquashFS images (>4GB metadata)
+    pub(crate) metadata_start: u64,
     // All current bytes that are uncompressed
     pub(crate) uncompressed_bytes: VecDeque<u8>,
     // All current bytes that are compressed or uncompressed
@@ -89,7 +90,9 @@ impl<'a> MetadataWriter<'a> {
         };
 
         // Metadata len + bytes + last metadata_start
-        self.metadata_start += 2 + metadata.len() as u32;
+        // Use checked_add to detect overflow and panic with helpful message
+        self.metadata_start = self.metadata_start.checked_add(2 + metadata.len() as u64)
+            .expect("metadata_start overflow: total metadata size exceeds u64::MAX");
         trace!("new metadata start: {:#02x?}", self.metadata_start);
         self.final_bytes.push((compressed, metadata));
 

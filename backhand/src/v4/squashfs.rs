@@ -470,13 +470,20 @@ impl<'b> Squashfs<'b> {
         }
 
         let Some(offset) = self.dir_blocks.0.get(&block_index) else {
+            panic!("dir block index not found");
             return Err(BackhandError::CorruptedOrInvalidSquashfs);
         };
-        let Some(block) = &self.dir_blocks.1.get(*offset as usize..) else {
+        let Some(block) = &self.dir_blocks.1.get(usize::try_from(*offset).expect("offset u64 does not fit in usize")..) else {
             return Err(BackhandError::CorruptedOrInvalidSquashfs);
         };
 
-        if (block.len() as u32) < (block_offset as u32 + file_size - 3) {
+        if file_size < 3 {
+            return Err(BackhandError::CorruptedOrInvalidSquashfs);
+        }
+        let block_offset_u32 = u32::try_from(block_offset).expect("block_offset does not fit in u32");
+        let checked_size = block_offset_u32.checked_add(file_size).and_then(|s| s.checked_sub(3))
+            .expect("block_offset + file_size - 3 calculation overflow");
+        if (block.len() as u32) < checked_size {
             return Err(BackhandError::CorruptedOrInvalidSquashfs);
         }
 
@@ -506,7 +513,7 @@ impl<'b> Squashfs<'b> {
                 self.dir_from_index(
                     u64::from(basic_dir.block_index),
                     u32::from(basic_dir.file_size),
-                    basic_dir.block_offset as usize,
+                    usize::try_from(basic_dir.block_offset).expect("block_offset u16 does not fit in usize"),
                 )?
             }
             InodeInner::ExtendedDirectory(ext_dir) => {
@@ -514,7 +521,7 @@ impl<'b> Squashfs<'b> {
                 self.dir_from_index(
                     u64::from(ext_dir.block_index),
                     ext_dir.file_size,
-                    ext_dir.block_offset as usize,
+                    usize::try_from(ext_dir.block_offset).expect("block_offset u16 does not fit in usize"),
                 )?
             }
             _ => return Err(BackhandError::UnexpectedInode),

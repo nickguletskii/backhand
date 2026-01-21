@@ -1,13 +1,11 @@
 use std::ffi::OsStr;
 use std::fmt;
 
+use crate::error::BackhandError;
 use crate::kinds::Kind;
 use crate::v4::data::Added;
 use crate::v4::dir::{Dir, DirEntry};
-use crate::v4::inode::{
-    BasicDeviceSpecialFile, BasicDirectory, BasicFile, BasicSymlink, ExtendedDirectory, IPCNode,
-    Inode, InodeHeader, InodeId, InodeInner,
-};
+use crate::v4::inode::{BasicDeviceSpecialFile, BasicDirectory, BasicFile, BasicSymlink, ExtendedDirectory, ExtendedFile, IPCNode, Inode, InodeHeader, InodeId, InodeInner};
 use crate::v4::metadata::MetadataWriter;
 use crate::v4::squashfs::SuperBlock;
 use crate::v4::unix_string::OsStrExt;
@@ -15,7 +13,8 @@ use crate::{Id, NodeHeader, SquashfsBlockDevice, SquashfsCharacterDevice, Squash
 
 #[derive(Clone)]
 pub(crate) struct Entry<'a> {
-    pub start: u32,
+    /// Start position in metadata block (changed from u32 to u64 to match metadata_start)
+    pub start: u64,
     pub offset: u16,
     pub inode: u32,
     pub t: InodeId,
@@ -43,9 +42,11 @@ impl<'a> Entry<'a> {
         superblock: &SuperBlock,
         kind: &Kind,
         id_table: &[Id],
-    ) -> Self {
-        let uid = id_table.iter().position(|a| a.num == header.uid).unwrap() as u16;
-        let gid = id_table.iter().position(|a| a.num == header.gid).unwrap() as u16;
+    ) -> Result<Self, crate::BackhandError> {
+        let uid = id_table.iter().position(|a| a.num == header.uid)
+            .ok_or(BackhandError::InvalidIdTable)? as u16;
+        let gid = id_table.iter().position(|a| a.num == header.gid)
+            .ok_or(BackhandError::InvalidIdTable)? as u16;
         let header = InodeHeader {
             inode_number: inode,
             uid,
@@ -59,8 +60,14 @@ impl<'a> Entry<'a> {
                 InodeId::ExtendedDirectory,
                 header,
                 InodeInner::ExtendedDirectory(ExtendedDirectory {
-                    link_count: 2 + u32::try_from(children_num).unwrap(),
-                    file_size: file_size.try_into().unwrap(), // u32
+                    link_count: 2 + u32::try_from(children_num).map_err(|_| {
+                        panic!("link count overflow: exceeds u32::MAX");
+                        BackhandError::CorruptedOrInvalidSquashfs
+                    })?,
+                    file_size: {
+                        panic!("file size overflow: exceeds u32::MAX");
+                        file_size.try_into().map_err(|_| BackhandError::CorruptedOrInvalidSquashfs)?
+                    }, // u32
                     block_index,
                     parent_inode,
                     // TODO: Support Directory Index
@@ -78,15 +85,21 @@ impl<'a> Entry<'a> {
                 header,
                 InodeInner::BasicDirectory(BasicDirectory {
                     block_index,
-                    link_count: 2 + u32::try_from(children_num).unwrap(),
-                    file_size: file_size.try_into().unwrap(), // u16
+                    link_count: 2 + u32::try_from(children_num).map_err(|_| {
+                        panic!("link count overflow: exceeds u32::MAX");
+                        BackhandError::CorruptedOrInvalidSquashfs
+                    })?,
+                    file_size: file_size.try_into().map_err(|_| {
+                        panic!("file size overflow: exceeds u16::MAX");
+                        BackhandError::CorruptedOrInvalidSquashfs
+                    })?, // u16
                     block_offset,
                     parent_inode,
                 }),
             )
         };
 
-        dir_inode.to_bytes(name.as_bytes(), inode_writer, superblock, kind)
+        Ok(dir_inode.to_bytes(name.as_bytes(), inode_writer, superblock, kind))
     }
 
     /// Write data and metadata for file node
@@ -101,9 +114,11 @@ impl<'a> Entry<'a> {
         superblock: &SuperBlock,
         kind: &Kind,
         id_table: &[Id],
-    ) -> Self {
-        let uid = id_table.iter().position(|a| a.num == header.uid).unwrap() as u16;
-        let gid = id_table.iter().position(|a| a.num == header.gid).unwrap() as u16;
+    ) -> Result<Self, crate::BackhandError> {
+        let uid = id_table.iter().position(|a| a.num == header.uid)
+            .ok_or(BackhandError::InvalidIdTable)? as u16;
+        let gid = id_table.iter().position(|a| a.num == header.gid)
+            .ok_or(BackhandError::InvalidIdTable)? as u16;
         let header = InodeHeader {
             inode_number: inode,
             uid,
@@ -113,26 +128,35 @@ impl<'a> Entry<'a> {
         };
         let basic_file = match added {
             Added::Data { blocks_start, block_sizes } => {
-                BasicFile {
+                ExtendedFile {
                     blocks_start: *blocks_start,
                     frag_index: 0xffffffff, // <- no fragment
                     block_offset: 0x0,      // <- no fragment
-                    file_size: file_size.try_into().unwrap(),
+                    file_size: file_size.try_into().map_err(|_| {
+                        panic!("file size overflow: exceeds u32::MAX");
+                        BackhandError::CorruptedOrInvalidSquashfs
+                    })?,
+                    sparse: 0,
                     block_sizes: block_sizes.to_vec(),
+                    link_count: 0x1,
+                    xattr_index: 0,
                 }
             }
-            Added::Fragment { frag_index, block_offset } => BasicFile {
+            Added::Fragment { frag_index, block_offset } => ExtendedFile {
                 blocks_start: 0,
                 frag_index: *frag_index,
                 block_offset: *block_offset,
-                file_size: file_size.try_into().unwrap(),
+                file_size: file_size.try_into().map_err(|_| BackhandError::CorruptedOrInvalidSquashfs)?,
+                sparse: 0,
                 block_sizes: vec![],
+                link_count: 0x1,
+                xattr_index: 0,
             },
         };
 
-        let file_inode = Inode::new(InodeId::BasicFile, header, InodeInner::BasicFile(basic_file));
+        let file_inode = Inode::new(InodeId::ExtendedFile, header, InodeInner::ExtendedFile(basic_file));
 
-        file_inode.to_bytes(node_path.as_bytes(), inode_writer, superblock, kind)
+        Ok(file_inode.to_bytes(node_path.as_bytes(), inode_writer, superblock, kind))
     }
 
     /// Write data and metadata for symlink node
@@ -146,9 +170,11 @@ impl<'a> Entry<'a> {
         superblock: &SuperBlock,
         kind: &Kind,
         id_table: &[Id],
-    ) -> Self {
-        let uid = id_table.iter().position(|a| a.num == header.uid).unwrap() as u16;
-        let gid = id_table.iter().position(|a| a.num == header.gid).unwrap() as u16;
+    ) -> Result<Self, crate::BackhandError> {
+        let uid = id_table.iter().position(|a| a.num == header.uid)
+            .ok_or(BackhandError::InvalidIdTable)? as u16;
+        let gid = id_table.iter().position(|a| a.num == header.gid)
+            .ok_or(BackhandError::InvalidIdTable)? as u16;
         let header = InodeHeader {
             inode_number: inode,
             uid,
@@ -162,12 +188,15 @@ impl<'a> Entry<'a> {
             header,
             InodeInner::BasicSymlink(BasicSymlink {
                 link_count: 0x1,
-                target_size: link.len().try_into().unwrap(),
+                target_size: link.len().try_into().map_err(|_| {
+                    panic!("target size overflow: exceeds u16::MAX");
+                    BackhandError::CorruptedOrInvalidSquashfs
+                })?,
                 target_path: link.to_vec(),
             }),
         );
 
-        sym_inode.to_bytes(node_path.as_bytes(), inode_writer, superblock, kind)
+        Ok(sym_inode.to_bytes(node_path.as_bytes(), inode_writer, superblock, kind))
     }
 
     /// Write data and metadata for char device node
@@ -181,9 +210,11 @@ impl<'a> Entry<'a> {
         superblock: &SuperBlock,
         kind: &Kind,
         id_table: &[Id],
-    ) -> Self {
-        let uid = id_table.iter().position(|a| a.num == header.uid).unwrap() as u16;
-        let gid = id_table.iter().position(|a| a.num == header.gid).unwrap() as u16;
+    ) -> Result<Self, crate::BackhandError> {
+        let uid = id_table.iter().position(|a| a.num == header.uid)
+            .ok_or(BackhandError::InvalidIdTable)? as u16;
+        let gid = id_table.iter().position(|a| a.num == header.gid)
+            .ok_or(BackhandError::InvalidIdTable)? as u16;
         let header = InodeHeader {
             inode_number: inode,
             uid,
@@ -200,7 +231,7 @@ impl<'a> Entry<'a> {
             }),
         );
 
-        char_inode.to_bytes(node_path.as_bytes(), inode_writer, superblock, kind)
+        Ok(char_inode.to_bytes(node_path.as_bytes(), inode_writer, superblock, kind))
     }
 
     /// Write data and metadata for block device node
@@ -214,9 +245,11 @@ impl<'a> Entry<'a> {
         superblock: &SuperBlock,
         kind: &Kind,
         id_table: &[Id],
-    ) -> Self {
-        let uid = id_table.iter().position(|a| a.num == header.uid).unwrap() as u16;
-        let gid = id_table.iter().position(|a| a.num == header.gid).unwrap() as u16;
+    ) -> Result<Self, crate::BackhandError> {
+        let uid = id_table.iter().position(|a| a.num == header.uid)
+            .ok_or(BackhandError::InvalidIdTable)? as u16;
+        let gid = id_table.iter().position(|a| a.num == header.gid)
+            .ok_or(BackhandError::InvalidIdTable)? as u16;
         let header = InodeHeader {
             inode_number: inode,
             uid,
@@ -233,7 +266,7 @@ impl<'a> Entry<'a> {
             }),
         );
 
-        block_inode.to_bytes(node_path.as_bytes(), inode_writer, superblock, kind)
+        Ok(block_inode.to_bytes(node_path.as_bytes(), inode_writer, superblock, kind))
     }
 
     /// Write data and metadata for named pipe node
@@ -246,9 +279,11 @@ impl<'a> Entry<'a> {
         superblock: &SuperBlock,
         kind: &Kind,
         id_table: &[Id],
-    ) -> Self {
-        let uid = id_table.iter().position(|a| a.num == header.uid).unwrap() as u16;
-        let gid = id_table.iter().position(|a| a.num == header.gid).unwrap() as u16;
+    ) -> Result<Self, crate::BackhandError> {
+        let uid = id_table.iter().position(|a| a.num == header.uid)
+            .ok_or(BackhandError::InvalidIdTable)? as u16;
+        let gid = id_table.iter().position(|a| a.num == header.gid)
+            .ok_or(BackhandError::InvalidIdTable)? as u16;
         let header = InodeHeader {
             inode_number: inode,
             uid,
@@ -262,7 +297,7 @@ impl<'a> Entry<'a> {
             InodeInner::BasicNamedPipe(IPCNode { link_count: 0x1 }),
         );
 
-        char_inode.to_bytes(node_path.as_bytes(), inode_writer, superblock, kind)
+        Ok(char_inode.to_bytes(node_path.as_bytes(), inode_writer, superblock, kind))
     }
 
     /// Write data and metadata for socket
@@ -275,9 +310,11 @@ impl<'a> Entry<'a> {
         superblock: &SuperBlock,
         kind: &Kind,
         id_table: &[Id],
-    ) -> Self {
-        let uid = id_table.iter().position(|a| a.num == header.uid).unwrap() as u16;
-        let gid = id_table.iter().position(|a| a.num == header.gid).unwrap() as u16;
+    ) -> Result<Self, crate::BackhandError> {
+        let uid = id_table.iter().position(|a| a.num == header.uid)
+            .ok_or(BackhandError::InvalidIdTable)? as u16;
+        let gid = id_table.iter().position(|a| a.num == header.gid)
+            .ok_or(BackhandError::InvalidIdTable)? as u16;
         let header = InodeHeader {
             inode_number: inode,
             uid,
@@ -291,7 +328,7 @@ impl<'a> Entry<'a> {
             InodeInner::BasicSocket(IPCNode { link_count: 0x1 }),
         );
 
-        char_inode.to_bytes(node_path.as_bytes(), inode_writer, superblock, kind)
+        Ok(char_inode.to_bytes(node_path.as_bytes(), inode_writer, superblock, kind))
     }
 }
 
@@ -309,15 +346,29 @@ impl fmt::Debug for Entry<'_> {
 }
 
 impl Entry<'_> {
-    fn create_dir(creating_dir: &Vec<&Self>, start: u32, lowest_inode: u32) -> Dir {
+    fn create_dir(creating_dir: &Vec<&Self>, start: u64, lowest_inode: u32) -> Dir {
         let mut dir = Dir::new(lowest_inode);
 
-        dir.count = creating_dir.len().try_into().unwrap();
+        // SquashFS format requires: count = number of entries - 1
+        // This matches the formula in dir.rs line 46: count = (len - 1)
+        let count_value = creating_dir.len().checked_sub(1)
+            .ok_or_else(|| {
+                panic!("count underflow: directory must have at least one entry");
+                BackhandError::CorruptedOrInvalidSquashfs
+            })
+            .expect("directory must have at least one entry");
+        dir.count = count_value.try_into().unwrap();
         if dir.count >= 256 {
             panic!("dir.count({}) >= 256:", dir.count);
         }
 
-        dir.start = start;
+        // Convert u64 start to u32 for Dir structure (metadata_start is u64, but Dir.start is u32)
+        dir.start = u32::try_from(start)
+            .map_err(|_| {
+                panic!("directory start offset overflow: exceeds u32::MAX");
+                BackhandError::CorruptedOrInvalidSquashfs
+            })
+            .expect("directory start offset exceeds u32::MAX");
         for e in creating_dir {
             let inode = e.inode;
             let new_entry = DirEntry {

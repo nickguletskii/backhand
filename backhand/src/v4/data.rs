@@ -71,7 +71,7 @@ impl DataSize {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Added {
     // Only Data was added
-    Data { blocks_start: u32, block_sizes: Vec<DataSize> },
+    Data { blocks_start: u64, block_sizes: Vec<DataSize> },
     // Only Fragment was added
     Fragment { frag_index: u32, block_offset: u32 },
 }
@@ -162,7 +162,8 @@ impl<'a> DataWriter<'a> {
 
         // if the first block is not full (fragment), store only a fragment
         // otherwise processed to store blocks
-        let blocks_start = writer.stream_position()? as u32;
+        let stream_pos = writer.stream_position()?;
+        let blocks_start = stream_pos;
         let first_block = match reader.next_block(&mut read_buf) {
             Some(Ok(first_block)) => first_block,
             Some(Err(x)) => return Err(x),
@@ -178,8 +179,10 @@ impl<'a> DataWriter<'a> {
                 self.finalize(writer)?;
             }
             // add to fragment bytes
-            let frag_index = self.fragment_table.len() as u32;
-            let block_offset = self.fragment_bytes.len() as u32;
+            let frag_index = u32::try_from(self.fragment_table.len())
+                .unwrap_or_else(|_| panic!("fragment index overflow: exceeds u32::MAX"));
+            let block_offset = u32::try_from(self.fragment_bytes.len())
+                .unwrap_or_else(|_| panic!("fragment bytes overflow: exceeds u32::MAX"));
             self.fragment_bytes.write_all(&decompress_buf)?;
 
             return Ok((decompress_buf.len(), Added::Fragment { frag_index, block_offset }));
@@ -200,11 +203,15 @@ impl<'a> DataWriter<'a> {
                 // compression didn't reduce size
                 if cb.len() > decompress_buf.len() {
                     // store uncompressed
-                    block_sizes.push(DataSize::new_uncompressed(decompress_buf.len() as u32));
+                    let decompress_len = u32::try_from(decompress_buf.len())
+                        .unwrap_or_else(|_| panic!("decompress_buf length overflow: exceeds u32::MAX"));
+                    block_sizes.push(DataSize::new_uncompressed(decompress_len));
                     writer.write_all(&decompress_buf)?;
                 } else {
                     // store compressed
-                    block_sizes.push(DataSize::new_compressed(cb.len() as u32));
+                    let cb_len = u32::try_from(cb.len())
+                        .unwrap_or_else(|_| panic!("compressed buffer length overflow: exceeds u32::MAX"));
+                    block_sizes.push(DataSize::new_compressed(cb_len));
                     writer.write_all(&cb)?;
                 }
             } else {
@@ -244,15 +251,18 @@ impl<'a> DataWriter<'a> {
             }
 
             // add to fragment bytes
-            let frag_index = self.fragment_table.len() as u32;
-            let block_offset = self.fragment_bytes.len() as u32;
+            let frag_index = u32::try_from(self.fragment_table.len())
+                .unwrap_or_else(|_| panic!("fragment index overflow: exceeds u32::MAX"));
+            let block_offset = u32::try_from(self.fragment_bytes.len())
+                .unwrap_or_else(|_| panic!("fragment bytes overflow: exceeds u32::MAX"));
             self.fragment_bytes.write_all(chunk)?;
 
             return Ok((chunk_reader.file_len, Added::Fragment { frag_index, block_offset }));
         }
 
         // Add to data bytes
-        let blocks_start = writer.stream_position()? as u32;
+        let stream_pos = writer.stream_position()?;
+        let blocks_start = stream_pos as u64;
         let mut block_sizes = vec![];
 
         // If duplicate file checking is enabled, use the old data position as this file if it hashes the same
@@ -276,11 +286,15 @@ impl<'a> DataWriter<'a> {
             // compression didn't reduce size
             if cb.len() > chunk.len() {
                 // store uncompressed
-                block_sizes.push(DataSize::new_uncompressed(chunk.len() as u32));
+                let chunk_len = u32::try_from(chunk.len())
+                    .unwrap_or_else(|_| panic!("chunk length overflow: exceeds u32::MAX"));
+                block_sizes.push(DataSize::new_uncompressed(chunk_len));
                 writer.write_all(chunk)?;
             } else {
                 // store compressed
-                block_sizes.push(DataSize::new_compressed(cb.len() as u32));
+                let cb_len = u32::try_from(cb.len())
+                    .unwrap_or_else(|_| panic!("compressed buffer length overflow: exceeds u32::MAX"));
+                block_sizes.push(DataSize::new_compressed(cb_len));
                 writer.write_all(&cb)?;
             }
             chunk = chunk_reader.read_chunk()?;
@@ -313,11 +327,15 @@ impl<'a> DataWriter<'a> {
         let size = if cb.len() > self.fragment_bytes.len() {
             // store uncompressed
             writer.write_all(&self.fragment_bytes)?;
-            DataSize::new_uncompressed(self.fragment_bytes.len() as u32)
+            let frag_len = u32::try_from(self.fragment_bytes.len())
+                .unwrap_or_else(|_| panic!("fragment_bytes length overflow: exceeds u32::MAX"));
+            DataSize::new_uncompressed(frag_len)
         } else {
             // store compressed
             writer.write_all(&cb)?;
-            DataSize::new_compressed(cb.len() as u32)
+            let cb_len = u32::try_from(cb.len())
+                .unwrap_or_else(|_| panic!("compressed buffer length overflow: exceeds u32::MAX"));
+            DataSize::new_compressed(cb_len)
         };
         self.fragment_table.push(Fragment::new(start, size, 0));
         self.fragment_bytes.clear();

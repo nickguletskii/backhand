@@ -268,10 +268,10 @@ impl<'b> FilesystemReaderTrait for crate::v4::filesystem::reader::FilesystemRead
                 block_sizes,
             } => crate::v4::filesystem::node::SquashfsFileReader::Basic(
                 crate::v4::inode::BasicFile {
-                    blocks_start: *blocks_start as u32,
+                    blocks_start: u32::try_from(*blocks_start).expect("blocks_start too large for BasicFile"),
                     frag_index: *frag_index,
                     block_offset: *block_offset,
-                    file_size: *file_size as u32,
+                    file_size: u32::try_from(*file_size).expect("blocks_start too large for BasicFile"),
                     block_sizes: block_sizes.iter().map(|&ds| ds.to_v4_datasize()).collect(),
                 },
             ),

@@ -517,76 +517,82 @@ impl<'a, 'b, 'c> FilesystemWriter<'a, 'b, 'c> {
         //if not a dir, return the entry
         match &node.inner {
             InnerNode::File(SquashfsFileWriter::Consumed(filesize, added)) => {
-                return Ok(Entry::file(
+                let node_id_u32 = u32::try_from(node_id.get()).expect("node_id exceeds u32::MAX");
+                return Entry::file(
                     filename,
                     node.header,
-                    node_id.get().try_into().unwrap(),
+                    node_id_u32,
                     inode_writer,
                     *filesize,
                     added,
                     superblock,
                     kind,
                     id_table,
-                ));
+                );
             }
             InnerNode::File(_) => unreachable!(),
             InnerNode::Symlink(symlink) => {
-                return Ok(Entry::symlink(
+                let node_id_u32 = u32::try_from(node_id.get()).expect("node_id exceeds u32::MAX");
+                return Entry::symlink(
                     filename,
                     node.header,
                     symlink,
-                    node_id.get().try_into().unwrap(),
+                    node_id_u32,
                     inode_writer,
                     superblock,
                     kind,
                     id_table,
-                ));
+                );
             }
             InnerNode::CharacterDevice(char) => {
-                return Ok(Entry::char(
+                let node_id_u32 = u32::try_from(node_id.get()).expect("node_id exceeds u32::MAX");
+                return Entry::char(
                     filename,
                     node.header,
                     char,
-                    node_id.get().try_into().unwrap(),
+                    node_id_u32,
                     inode_writer,
                     superblock,
                     kind,
                     id_table,
-                ));
+                );
             }
             InnerNode::BlockDevice(block) => {
-                return Ok(Entry::block_device(
+                let node_id_u32 = u32::try_from(node_id.get()).expect("node_id exceeds u32::MAX");
+                return Entry::block_device(
                     filename,
                     node.header,
                     block,
-                    node_id.get().try_into().unwrap(),
+                    node_id_u32,
                     inode_writer,
                     superblock,
                     kind,
                     id_table,
-                ));
+                );
             }
             InnerNode::NamedPipe => {
-                return Ok(Entry::named_pipe(
+                let node_id_u32 = u32::try_from(node_id.get()).expect("node_id exceeds u32::MAX");
+                return Entry::named_pipe(
                     filename,
                     node.header,
-                    node_id.get().try_into().unwrap(),
+                    node_id_u32,
                     inode_writer,
                     superblock,
                     kind,
                     id_table,
-                ));
+                );
             }
             InnerNode::Socket => {
-                return Ok(Entry::socket(
+                let node_id_u32 = u32::try_from(node_id.get()).expect("node_id exceeds u32::MAX");
+                return Entry::socket(
                     filename,
                     node.header,
-                    node_id.get().try_into().unwrap(),
+                    node_id_u32,
                     inode_writer,
                     superblock,
                     kind,
                     id_table,
-                ));
+                );
             }
             // if dir, fall through
             InnerNode::Dir(_) => (),
@@ -601,10 +607,11 @@ impl<'a, 'b, 'c> FilesystemWriter<'a, 'b, 'c> {
                 child.fullpath.parent().map(|child| child == node.fullpath).unwrap_or(false)
             })
             .map(|(child_id, _child)| {
+                let parent_node_id_u32 = u32::try_from(node_id.get()).expect("node_id exceeds u32::MAX");
                 self.write_inode_dir(
                     inode_writer,
                     dir_writer,
-                    node_id.get().try_into().unwrap(),
+                    parent_node_id_u32,
                     child_id,
                     superblock,
                     kind,
@@ -615,8 +622,11 @@ impl<'a, 'b, 'c> FilesystemWriter<'a, 'b, 'c> {
         let children_num = entries.len();
 
         // write dir
-        let block_index = dir_writer.metadata_start;
-        let block_offset = dir_writer.uncompressed_bytes.len() as u16;
+        let block_index_u64 = dir_writer.metadata_start;
+        let block_index = u32::try_from(block_index_u64)
+            .map_err(|_| BackhandError::CorruptedOrInvalidSquashfs)?;
+        let block_offset = u16::try_from(dir_writer.uncompressed_bytes.len())
+            .map_err(|_| BackhandError::CorruptedOrInvalidSquashfs)?;
         trace!("WRITING DIR: {block_offset:#02x?}");
         let mut total_size: usize = 3;
         for dir in Entry::into_dir(entries) {
@@ -629,7 +639,7 @@ impl<'a, 'b, 'c> FilesystemWriter<'a, 'b, 'c> {
         let entry = Entry::path(
             filename,
             node.header,
-            node_id.get().try_into().unwrap(),
+            u32::try_from(node_id.get()).expect("node_id exceeds u32::MAX"),
             children_num,
             parent_node_id,
             inode_writer,
@@ -639,7 +649,7 @@ impl<'a, 'b, 'c> FilesystemWriter<'a, 'b, 'c> {
             superblock,
             kind,
             id_table,
-        );
+        )?;
         trace!("[{:?}] entries: {:#02x?}", filename, &entry);
         Ok(entry)
     }
@@ -715,13 +725,18 @@ impl<'a, 'b, 'c> FilesystemWriter<'a, 'b, 'c> {
             &mut inode_writer,
             &mut dir_writer,
             0,
-            1.try_into().unwrap(),
+            NonZeroUsize::new(1).expect("1 should always be non-zero"),
             &superblock,
             &self.kind,
             &self.id_table,
         )?;
-        superblock.root_inode = ((root.start as u64) << 16) | ((root.offset as u64) & 0xffff);
-        superblock.inode_count = self.root.nodes.len().try_into().unwrap();
+        // Bounds check: root.start must fit in 48 bits (64 - 16 for offset)
+        // Maximum value: 2^48 - 1 = 281,474,976,710,655
+        if root.start > 0xffff_ffff_ffff {
+            return Err(BackhandError::CorruptedOrInvalidSquashfs);
+        }
+        superblock.root_inode = (root.start << 16) | ((root.offset as u64) & 0xffff);
+        superblock.inode_count = u32::try_from(self.root.nodes.len()).expect("inode count exceeds u32::MAX");
         superblock.block_size = self.block_size;
         superblock.block_log = self.block_log;
         superblock.mod_time = self.mod_time;
@@ -743,7 +758,7 @@ impl<'a, 'b, 'c> FilesystemWriter<'a, 'b, 'c> {
         info!("Writing Id Lookup Table");
         let (table_position, count) = self.write_lookup_table(&mut w, &self.id_table, Id::SIZE)?;
         superblock.id_table = table_position;
-        superblock.id_count = count.try_into().unwrap();
+        superblock.id_count = u16::try_from(count).expect("id_count exceeds u16::MAX");
 
         info!("Finalize Superblock and End Bytes");
         let bytes_written = self.finalize(w, &mut superblock)?;
@@ -765,7 +780,7 @@ impl<'a, 'b, 'c> FilesystemWriter<'a, 'b, 'c> {
             info!("Writing Padding");
             let blocks_used: u64 = superblock.bytes_used / (self.pad_len as u64);
             let total_pad_len = (blocks_used + 1) * (self.pad_len as u64);
-            pad_len = u32::try_from(total_pad_len - superblock.bytes_used).unwrap();
+            pad_len = u32::try_from(total_pad_len - superblock.bytes_used).expect("padding length exceeds u32::MAX");
 
             // Write 1K at a time
             let mut total_written = 0;
@@ -780,7 +795,7 @@ impl<'a, 'b, 'c> FilesystemWriter<'a, 'b, 'c> {
                     1024
                 };
 
-                w.write_all(&arr[..len.try_into().unwrap()])?;
+                w.write_all(&arr[..usize::try_from(len).expect("len exceeds usize::MAX")])?;
                 total_written += len;
             }
         }
@@ -857,7 +872,7 @@ impl<'a, 'b, 'c> FilesystemWriter<'a, 'b, 'c> {
                 ptrs.push(w.stream_position()?);
 
                 // write metadata len
-                let len = metadata::set_if_uncompressed(table_bytes.get_ref().len() as u16);
+                let len = metadata::set_if_uncompressed(u16::try_from(table_bytes.get_ref().len()).expect("table_bytes length exceeds u16::MAX"));
                 let mut writer = Writer::new(&mut w);
                 len.to_writer(&mut writer, self.kind.inner.data_endian)?;
                 // write metadata bytes
@@ -869,7 +884,7 @@ impl<'a, 'b, 'c> FilesystemWriter<'a, 'b, 'c> {
         }
 
         let table_position = w.stream_position()?;
-        let count = table.len() as u32;
+        let count = u32::try_from(table.len()).expect("table length exceeds u32::MAX");
 
         // write ptr
         for ptr in ptrs {
@@ -885,10 +900,10 @@ impl<'a, 'b, 'c> FilesystemWriter<'a, 'b, 'c> {
         let found = self.id_table.iter().position(|a| a.num == id);
 
         match found {
-            Some(found) => found as u32,
+            Some(found) => u32::try_from(found).expect("id_table index exceeds u32::MAX"),
             None => {
                 self.id_table.push(Id::new(id));
-                self.id_table.len() as u32 - 1
+                u32::try_from(self.id_table.len() - 1).expect("id_table index exceeds u32::MAX")
             }
         }
     }

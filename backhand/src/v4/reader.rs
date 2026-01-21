@@ -93,7 +93,7 @@ pub trait SquashFsReader: BufReadSeek + Sized {
             superblock,
             superblock.dir_table,
             kind,
-        )?;
+        ).expect("uncompress_metadatas");
 
         let mut inodes = IntMap::default();
         // Be nice the allocator, and only allocate a max of u16::MAX count of Indoes
@@ -111,7 +111,7 @@ pub trait SquashFsReader: BufReadSeek + Sized {
                     superblock.block_log,
                     kind.inner.type_endian,
                 ),
-            )?;
+            ).expect("from_reader_with_ctx");
             inodes.insert(inode.header.inode_number, inode);
         }
 
@@ -139,7 +139,7 @@ pub trait SquashFsReader: BufReadSeek + Sized {
                 superblock.block_log,
                 kind.inner.type_endian,
             ),
-        )?;
+        ).expect("from_reader_with_ctx");
 
         Ok((root_inode, inodes))
     }
